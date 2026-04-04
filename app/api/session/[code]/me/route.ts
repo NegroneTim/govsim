@@ -39,8 +39,21 @@ export async function GET(
     return NextResponse.json({ error: "Member not found or kicked." }, { status: 401 });
   }
 
+  // 2. Session-ийн is_speech_mode утгыг авах
+  const { data: session, error: sessionError } = await supabase
+    .from("sessions")
+    .select("is_speech_mode")
+    .eq("code", sessionCode)
+    .maybeSingle();
+
+  if (sessionError) {
+    console.error("Session fetch error:", sessionError);
+  }
+
+  const isSpeechMode = session?.is_speech_mode ?? false;
+
   const now = new Date();
-  // 2. Хамгийн сүүлийн poll хайх
+  // 3. Хамгийн сүүлийн poll хайх
   const { data: poll } = await supabase
     .from("polls")
     .select("*")
@@ -54,6 +67,8 @@ export async function GET(
       poll: null,
       myVote: null,
       member: { fullName: member.full_name },
+      handRaisedAt: member.hand_raised_at ?? null,
+      isSpeechMode,
     });
   }
 
@@ -74,7 +89,7 @@ export async function GET(
     status: poll.status,
   };
 
-  // 3. Санал шалгах
+  // 4. Санал шалгах
   const { data: vote } = await supabase
     .from("votes")
     .select("choice")
@@ -82,9 +97,34 @@ export async function GET(
     .eq("member_id", member.id)
     .maybeSingle();
 
+  // 5. Хэрэв poll идэвхгүй бол үр дүнг тооцоолох
+  let results = null;
+  if (poll && !isActive && poll.status === "closed") {
+    const { data: votes, error: votesError } = await supabase
+      .from("votes")
+      .select("choice")
+      .eq("poll_id", poll.id);
+
+    if (!votesError && votes) {
+      const approveCount = votes.filter((v: any) => v.choice === "approve").length;
+      const denyCount = votes.filter((v: any) => v.choice === "deny").length;
+      const totalVotes = approveCount + denyCount;
+      results = {
+        totalVotes,
+        approveCount,
+        denyCount,
+        approvePercent: totalVotes > 0 ? (approveCount / totalVotes) * 100 : 0,
+        denyPercent: totalVotes > 0 ? (denyCount / totalVotes) * 100 : 0,
+      };
+    }
+  }
+
   return NextResponse.json({
     poll: pollPayload,
     myVote: vote ? (vote.choice as "approve" | "deny") : null,
     member: { fullName: member.full_name },
+    handRaisedAt: member.hand_raised_at ?? null,
+    isSpeechMode,
+    results,
   });
 }

@@ -243,7 +243,7 @@ export default function AdminSessionPage() {
     setPollFromScreen(json.poll);
     setResults(json.results);
     setAttendance(json.attendance ?? null);
-    setIsSpeechMode(!!json.isSpeechMode);
+    setIsSpeechMode(!!(json.isSpeechMode ?? (json as any).is_speech_mode));
     const p = json.poll;
     if (p?.isActive) {
       if (receivePollIdRef.current !== p.id) {
@@ -260,22 +260,39 @@ export default function AdminSessionPage() {
 
   const loadMembers = useCallback(
     async (kind: "load" | "refresh" = "load") => {
-      if (!xAdminKey) return;
+      if (!xAdminKey) {
+        console.log("No admin key, skipping loadMembers");
+        return;
+      }
       if (kind === "load") setMembersLoading(true);
       if (kind === "refresh") setRefreshingMembers(true);
       try {
+        console.log(`Loading members (${kind})...`);
         const res = await fetch(`/api/admin/sessions/${code}/members`, {
           headers: { "X-Admin-Key": xAdminKey },
+          cache: "no-store", // Cache-г албадан шинэчлэх
         });
         if (!res.ok) {
+          console.error("Failed to load members:", res.status);
           return;
         }
         const json: { members: AdminMember[] } = await res.json();
-        setMembers(
-          json.members
-            .map((m) => ({ ...m, handRaisedAt: m.handRaisedAt ?? m.hand_raised_at ?? null }))
-            .filter((m) => !m.kickedAt)
-        );
+
+        console.log("Raw members from API:", json.members);
+
+        // hand_raised_at утгыг зөв хувиргах
+        const processedMembers = json.members
+          .map((m) => ({
+            ...m,
+            handRaisedAt: m.hand_raised_at || m.handRaisedAt || null
+          }))
+          .filter((m) => !m.kickedAt);
+
+        console.log("Processed members with hand raised:", processedMembers.filter(m => m.handRaisedAt));
+
+        setMembers(processedMembers);
+      } catch (error) {
+        console.error("Failed to load members:", error);
       } finally {
         if (kind === "load") setMembersLoading(false);
         if (kind === "refresh") setRefreshingMembers(false);
@@ -283,7 +300,12 @@ export default function AdminSessionPage() {
     },
     [xAdminKey, code]
   );
-
+  // AdminSessionPage компонент дотор, isSpeechMode state-ийн дараа нэмэх:
+  useEffect(() => {
+    if (isSpeechMode) {
+      setForceAttendanceView(false);
+    }
+  }, [isSpeechMode]);
   useEffect(() => {
     setNowISO(new Date().toISOString());
     const id = window.setInterval(() => {
@@ -296,9 +318,12 @@ export default function AdminSessionPage() {
     void loadScreen();
   }, [loadScreen]);
 
-  // Эхлэлд гишүүдийг нэг удаа ачаалах (Гар өргөлт хянахад хэрэгтэй)
+
+  // Эхлэлд гишүүдийг нэг удаа ачаалах
   useEffect(() => {
+    console.log("Checking mount and admin key:", { mounted, xAdminKey });
     if (mounted && xAdminKey) {
+      console.log("Loading members on mount...");
       void loadMembers("load");
     }
   }, [mounted, xAdminKey, loadMembers]);
@@ -310,13 +335,69 @@ export default function AdminSessionPage() {
     const channel = supabase
       .channel(`admin_realtime_${code}`)
       .on("postgres_changes", {
-        event: "*",
+        event: "UPDATE",
         schema: "public",
         table: "members",
         filter: `session_code=eq.${code}`,
-      }, () => {
+      }, (payload: any) => {
+        console.log("Member UPDATE:", payload);
+        const newData = payload.new as any;
+
+        // Members state-г шууд шинэчлэх (бүхэлд нь дахин ачаалахгүйгээр)
+        setMembers(prev => prev.map(m => {
+          if (m.id === newData.id) {
+            return {
+              ...m,
+              handRaisedAt: newData.hand_raised_at,
+              fullName: newData.full_name,
+              kickedAt: newData.kicked_at,
+            };
+          }
+          return m;
+        }));
+
+        // Гар өргөлт эсвэл хасагдсан төлөв өөрчлөгдсөн бол ирц болон дэлгэцийн мэдээллийг шинэчлэх
+        if (
+          payload.old.hand_raised_at !== newData.hand_raised_at || 
+          payload.old.kicked_at !== newData.kicked_at
+        ) {
+          void loadScreen();
+        }
+      })
+      .on("postgres_changes", {
+        event: "INSERT",
+        schema: "public",
+        table: "members",
+        filter: `session_code=eq.${code}`,
+      }, (payload: any) => {
+        console.log("Member INSERT:", payload);
+        const newData = payload.new as any;
+
+        // Шинэ гишүүнийг members array-д нэмэх
+        const newMember: AdminMember = {
+          id: newData.id,
+          fullName: newData.full_name,
+          joinedAt: newData.created_at,
+          hand_raised_at: newData.hand_raised_at,
+          handRaisedAt: newData.hand_raised_at,
+          kickedAt: newData.kicked_at,
+        };
+
+        setMembers(prev => [...prev, newMember]);
         void loadScreen();
-        void loadMembers("refresh");
+      })
+      .on("postgres_changes", {
+        event: "DELETE",
+        schema: "public",
+        table: "members",
+        filter: `session_code=eq.${code}`,
+      }, (payload: any) => {
+        console.log("Member DELETE:", payload);
+        const oldData = payload.old as any;
+
+        // Хасагдсан гишүүнийг members array-с хасах
+        setMembers(prev => prev.filter(m => m.id !== oldData.id));
+        void loadScreen();
       })
       .on("postgres_changes", {
         event: "*",
@@ -331,8 +412,7 @@ export default function AdminSessionPage() {
         schema: "public",
         table: "votes",
         filter: `session_code=eq.${code}`,
-      }, (payload:any) => {
-        // Optimistically update the vote count for instant real-time feel
+      }, (payload: any) => {
         setAttendance((prev) =>
           prev ? { ...prev, votesCastCount: prev.votesCastCount + 1 } : prev
         );
@@ -343,7 +423,7 @@ export default function AdminSessionPage() {
     return () => {
       void supabase.removeChannel(channel);
     };
-  }, [code, mounted, loadScreen, loadMembers]); // showMembers-ийг хасав
+  }, [code, mounted, loadScreen]);
 
   useEffect(() => {
     setMounted(true);
@@ -353,44 +433,49 @@ export default function AdminSessionPage() {
     function onKeyDown(e: KeyboardEvent) {
       const key = e.key?.toLowerCase();
       if (!key || !["q", "a", "s", "e", "r", "x", "f"].includes(key)) return;
+
       const target = e.target as HTMLElement | null;
       const tag = target?.tagName?.toLowerCase();
       const isTypingContext =
         !!target &&
         (target.isContentEditable || tag === "input" || tag === "textarea" || tag === "select");
       if (isTypingContext) return;
+
       e.preventDefault();
-      if (key === "q") {
-        setShowQr((v) => !v);
-        return;
-      }
-      if (key === "f") {
-        void toggleSpeechMode();
-        return;
-      }
-      if (key === "e") {
-        void openMembersPanel();
-        return;
-      }
-      if (key === "r") {
-        void loadScreen();
-        return;
-      }
-      if (key === "x") {
-        setForceAttendanceView(true);
-        return;
-      }
-      if (key === "a") {
-        void startPoll(true);
-        return;
-      }
-      if (key === "s") {
-        void startPoll(false);
+
+      switch (key) {
+        case "q":
+          setShowQr((v) => !v);
+          break;
+        case "f":
+          void toggleSpeechMode();
+          break;
+        case "e":
+          void openMembersPanel();
+          break;
+        case "r":
+          void loadScreen();
+          break;
+        case "x":
+          if (isSpeechMode) {
+            // Speech mode үед X дарвал speech mode-г унтраа
+            void toggleSpeechMode();
+          } else {
+            setForceAttendanceView(true);
+          }
+          break;
+        case "a":
+          void startPoll(true);
+          break;
+        case "s":
+          void startPoll(false);
+          break;
       }
     }
+
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [pollFromScreen?.isActive, xAdminKey, code, loadMembers, loadScreen]);
+  }, [pollFromScreen?.isActive, xAdminKey, code, loadMembers, loadScreen, isSpeechMode]);
 
   useEffect(() => {
     if (!pollFromScreen?.isActive) return;
@@ -464,15 +549,28 @@ export default function AdminSessionPage() {
 
   // Гараа өргөсөн гишүүдийг хугацаагаар нь эрэмбэлж харуулах
   const raisedHandsQueue = useMemo(() => {
-    return members
-      .filter(m => m.handRaisedAt && !m.kickedAt)
-      .sort((a, b) => new Date(a.handRaisedAt!).getTime() - new Date(b.handRaisedAt!).getTime());
+    const raised = members
+      .filter(m => {
+        const hasHandRaised = m.handRaisedAt && !m.kickedAt;
+        if (hasHandRaised) {
+          console.log("Found raised hand:", m.fullName, m.handRaisedAt);
+        }
+        return hasHandRaised;
+      })
+      .sort((a, b) => {
+        const aTime = new Date(a.handRaisedAt!).getTime();
+        const bTime = new Date(b.handRaisedAt!).getTime();
+        return aTime - bTime;
+      });
+
+    console.log("Raised hands queue length:", raised.length);
+    return raised;
   }, [members]);
 
   async function lowerAllHands() {
     if (!xAdminKey) return;
     try {
-      const res = await fetch(`/api/admin/session/${code}/lower-all`, {
+      const res = await fetch(`/api/admin/sessions/${code}/lower-all`, {
         method: "POST",
         headers: { "X-Admin-Key": xAdminKey },
       });
@@ -488,14 +586,30 @@ export default function AdminSessionPage() {
     if (!xAdminKey) return;
     const next = !isSpeechMode;
     try {
-      await fetch(`/api/admin/sessions/${code}/speech-mode`, {
+      const response = await fetch(`/api/admin/sessions/${code}/speech-mode`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Admin-Key": xAdminKey },
         body: JSON.stringify({ active: next }),
       });
-      setIsSpeechMode(next);
-      if (!next) {
-        void lowerAllHands();
+
+      if (response.ok) {
+        setIsSpeechMode(next);
+        if (!next) {
+          // Speech mode унтарсан үед бүх гараа буулгах
+          await lowerAllHands();
+          // Мөн forceAttendanceView-г идэвхжүүлэхгүй байх
+          setForceAttendanceView(false);
+          // Members state-г шинэчлэх
+          setMembers(prev => prev.map(m => ({ ...m, handRaisedAt: null })));
+        } else {
+          // Speech mode идэвхжсэн үед attendance view-г нуух
+          setForceAttendanceView(false);
+        }
+        // Дэлгэцийг шинэчлэх
+        await loadScreen();
+      } else {
+        const error = await response.json();
+        console.error("Failed to toggle speech mode:", error);
       }
     } catch (err) {
       console.error("Failed to toggle speech mode", err);
@@ -764,23 +878,34 @@ export default function AdminSessionPage() {
       ) : null}
 
       {isSpeechMode ? (
-        <div className="flex min-h-screen flex-col items-center justify-center px-6 animate-in fade-in zoom-in duration-500">
-          <div className="mb-4 text-3xl font-bold uppercase tracking-[0.2em] text-[#fde047]">ҮГ ХЭЛЭХ ГИШҮҮД</div>
-          <div className="flex items-baseline gap-4 mb-12">
-            <span className="text-9xl font-black"><RollingNumber value={raisedHandsQueue.length} /></span>
-            <span className="text-4xl font-bold text-white/50 uppercase">ГАР ӨРГӨСӨН</span>
+        <div className="flex h-[100dvh] flex-col items-center px-6 pt-24 animate-in fade-in duration-700">
+          <div className="mb-8 flex flex-col items-center text-center shrink-0">
+            <div className="text-lg font-bold uppercase tracking-[0.3em] text-[#fde047] md:text-xl">Үг хэлэх хүсэлт гаргасан гишүүд</div>
+            <div className="mt-2 flex items-baseline gap-3">
+              <span className="text-5xl font-bold text-white leading-none md:text-6xl">
+                <RollingNumber value={raisedHandsQueue.length} />
+              </span>
+              <span className="text-lg font-medium text-white/50 uppercase tracking-widest md:text-xl">хүн</span>
+            </div>
           </div>
-          <div className="flex flex-wrap justify-center gap-6 max-w-6xl">
-            {raisedHandsQueue.map((m, i) => (
-              <div 
-                key={m.id} 
-                className="flex items-center gap-4 bg-white/10 backdrop-blur-md border border-white/20 rounded-2xl px-6 py-4 animate-in slide-in-from-bottom-4 fade-in duration-500"
-                style={{ animationDelay: `${i * 100}ms` }}
-              >
-                <span className="flex h-10 w-10 items-center justify-center rounded-full bg-[#fde047] text-[#0069a3] font-bold text-xl">{i + 1}</span>
-                <span className="text-2xl font-bold tracking-wide">{m.fullName}</span>
+
+          <div className="flex flex-col w-full max-w-4xl divide-y divide-white/10 border-t border-white/10 overflow-y-auto pb-10 custom-scrollbar">
+            {raisedHandsQueue.length === 0 ? (
+              <div className="text-center text-2xl text-white/30 font-light py-20 tracking-wide">
+                Гар өргөсөн гишүүн байхгүй байна.
               </div>
-            ))}
+            ) : (
+              raisedHandsQueue.map((m, i) => (
+                <div
+                  key={m.id}
+                  className="flex items-center py-4 px-2 md:py-5 md:px-4 animate-in fade-in slide-in-from-left-4 duration-500"
+                  style={{ animationDelay: `${i * 100}ms` }}
+                >
+                  <span className="w-12 shrink-0 text-2xl font-bold text-[#fde047]/80 md:w-16 md:text-3xl">{i + 1}.</span>
+                  <span className="text-xl font-semibold tracking-tight text-white md:text-3xl">{m.fullName}</span>
+                </div>
+              ))
+            )}
           </div>
         </div>
       ) : forceAttendanceView || (!pollFromScreen && !demoMode) ? (
@@ -822,14 +947,14 @@ export default function AdminSessionPage() {
           </div>
         </div>
       ) : resultsForUi ? (
-        <div className="flex min-h-screen flex-col px-6 pb-6 pt-24 md:px-10 md:pt-28">
+        <div className="flex h-[100dvh] flex-col px-6 pb-6 pt-24 md:px-10 md:pt-28 overflow-hidden">
           {demoMode && !results ? (
-            <div className="mb-3 text-center text-sm font-semibold uppercase tracking-wide text-white/75">
+            <div className="mb-2 text-center text-xs font-semibold uppercase tracking-wide text-white/75 shrink-0">
               Дэмо горим — зөвхөн дизайн (?demo=1)
             </div>
           ) : null}
 
-          <div className="mx-auto grid min-h-0 w-full max-w-[min(100%,96rem)] flex-1 grid-cols-2 gap-6 md:gap-12">
+          <div className="mx-auto grid min-h-0 w-full max-w-[min(100%,96rem)] flex-1 grid-cols-1 md:grid-cols-2 gap-6 md:gap-12 overflow-y-auto md:overflow-hidden pb-4">
             <div
               className={[
                 "flex min-h-0 flex-col gap-1",
@@ -840,8 +965,8 @@ export default function AdminSessionPage() {
             >
               {resultsForUi.anonymous ? (
                 <div className="flex w-full shrink-0 flex-col items-center text-center">
-                  <div className="text-5xl font-bold uppercase md:text-7xl lg:text-8xl">Зөвшөөрсөн</div>
-                  <div className="mt-1 text-2xl font-semibold md:text-4xl lg:text-5xl">
+                  <div className="text-4xl font-bold uppercase md:text-7xl lg:text-8xl">Зөвшөөрсөн</div>
+                  <div className="mt-1 text-xl font-semibold md:text-4xl lg:text-5xl">
                     <RollingNumber value={resultsForUi.approveCount} />/<RollingNumber value={attendance?.eligibleMemberCount ?? resultsForUi.totalVotes} />{" "}
                     {resultsForUi.approvePercent.toFixed(1)}%
                   </div>
@@ -849,16 +974,16 @@ export default function AdminSessionPage() {
               ) : (
                 <div className="flex min-h-0 w-full min-w-0 flex-1 flex-col px-0 sm:px-3 md:px-8 lg:px-12 xl:px-16 2xl:px-24">
                   <div className="mx-auto w-full max-w-[26rem] shrink-0">
-                    <div className="text-start leading-tight">
-                      <div className="text-4xl font-bold uppercase md:text-6xl">Зөвшөөрсөн</div>
-                      <div className="mt-1 text-lg font-semibold leading-tight md:text-2xl">
+                    <div className="text-center md:text-start leading-tight">
+                      <div className="text-3xl font-bold uppercase md:text-6xl">Зөвшөөрсөн</div>
+                      <div className="mt-1 text-base font-semibold leading-tight md:text-2xl">
                         <RollingNumber value={resultStatsForScreen!.approveCount} />/
                         <RollingNumber value={attendance?.eligibleMemberCount ?? resultStatsForScreen!.totalVotes} />{" "}
                         {resultStatsForScreen!.approvePercent.toFixed(1)}%
                       </div>
                     </div>
                   </div>
-                  <div className="admin-credits-clip box-border mt-1 min-h-[min(52vh,520px)] w-full flex-1 overflow-hidden text-start md:h-[calc(100vh-15rem)] md:max-h-[calc(100vh-15rem)] md:flex-none">
+                  <div className="admin-credits-clip box-border mt-1 min-h-[280px] md:min-h-[min(52vh,520px)] w-full flex-1 overflow-hidden text-center md:text-start md:h-[calc(100vh-15rem)] md:max-h-[calc(100vh-15rem)] md:flex-none">
                     <div
                       className="screen-credits-track pr-1"
                       style={{ animationDuration: `${creditsDurationSec}s`, animationIterationCount: "infinite" }}
@@ -867,7 +992,7 @@ export default function AdminSessionPage() {
                         <div className="pt-1 text-3xl text-white/80 md:text-4xl">—</div>
                       ) : (
                         approveDisplay.map((v) => (
-                          <div key={v.memberId} className="mb-3 text-2xl font-semibold md:text-4xl">
+                          <div key={v.memberId} className="mb-3 text-xl font-semibold md:text-4xl">
                             {v.fullName}
                           </div>
                         ))
@@ -887,8 +1012,8 @@ export default function AdminSessionPage() {
             >
               {resultsForUi.anonymous ? (
                 <div className="flex w-full shrink-0 flex-col items-center text-center">
-                  <div className="text-5xl font-bold uppercase text-[#fde047] md:text-7xl lg:text-8xl">Татгалзсан</div>
-                  <div className="mt-1 text-2xl font-semibold text-[#fde047] md:text-4xl lg:text-5xl">
+                  <div className="text-4xl font-bold uppercase text-[#fde047] md:text-7xl lg:text-8xl">Татгалзсан</div>
+                  <div className="mt-1 text-xl font-semibold text-[#fde047] md:text-4xl lg:text-5xl">
                     <RollingNumber value={resultsForUi.denyCount} />/<RollingNumber value={attendance?.eligibleMemberCount ?? resultsForUi.totalVotes} />{" "}
                     {resultsForUi.denyPercent.toFixed(1)}%
                   </div>
@@ -896,16 +1021,16 @@ export default function AdminSessionPage() {
               ) : (
                 <div className="flex min-h-0 w-full min-w-0 flex-1 flex-col px-0 sm:px-3 md:px-8 lg:px-12 xl:px-16 2xl:px-24">
                   <div className="mx-auto w-full max-w-[26rem] shrink-0">
-                    <div className="text-start leading-tight">
-                      <div className="text-4xl font-bold uppercase text-[#fde047] md:text-6xl">Татгалзсан</div>
-                      <div className="mt-1 text-lg font-semibold leading-tight text-[#fde047] md:text-2xl">
+                    <div className="text-center md:text-start leading-tight">
+                      <div className="text-3xl font-bold uppercase text-[#fde047] md:text-6xl">Татгалзсан</div>
+                      <div className="mt-1 text-base font-semibold leading-tight text-[#fde047] md:text-2xl">
                         <RollingNumber value={resultStatsForScreen!.denyCount} />/
                         <RollingNumber value={attendance?.eligibleMemberCount ?? resultStatsForScreen!.totalVotes} />{" "}
                         {resultStatsForScreen!.denyPercent.toFixed(1)}%
                       </div>
                     </div>
                   </div>
-                  <div className="admin-credits-clip box-border mt-1 min-h-[min(52vh,520px)] w-full flex-1 overflow-hidden text-start md:h-[calc(100vh-15rem)] md:max-h-[calc(100vh-15rem)] md:flex-none">
+                  <div className="admin-credits-clip box-border mt-1 min-h-[280px] md:min-h-[min(52vh,520px)] w-full flex-1 overflow-hidden text-center md:text-start md:h-[calc(100vh-15rem)] md:max-h-[calc(100vh-15rem)] md:flex-none">
                     <div
                       className="screen-credits-track pr-1"
                       style={{ animationDuration: `${creditsDurationSec}s`, animationIterationCount: "infinite" }}
@@ -914,7 +1039,7 @@ export default function AdminSessionPage() {
                         <div className="pt-1 text-3xl text-[#fde047] md:text-4xl">—</div>
                       ) : (
                         denyDisplay.map((v) => (
-                          <div key={v.memberId} className="mb-3 text-2xl font-semibold text-[#fde047] md:text-4xl">
+                          <div key={v.memberId} className="mb-3 text-xl font-semibold text-[#fde047] md:text-4xl">
                             {v.fullName}
                           </div>
                         ))

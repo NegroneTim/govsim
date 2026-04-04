@@ -330,7 +330,7 @@ export default function SessionPage() {
   }
 
   return (
-    <div className="mx-auto w-full max-w-5xl px-5 py-8 md:px-8">
+    <div className="mx-auto flex min-h-[100dvh] w-full max-w-5xl flex-col px-5 py-6 md:px-8">
       {/* Raise Hand Floating Button */}
       {token && data?.isSpeechMode && (
         <button
@@ -360,11 +360,11 @@ export default function SessionPage() {
         </div>
       ) : null}
 
-      <div className="rounded-3xl border border-white/10 bg-gradient-to-b from-white/10 to-transparent p-6 shadow-2xl backdrop-blur-xl">
-        <div className="flex flex-wrap items-center justify-between gap-4 border-b border-white/10 pb-6">
+      <div className="rounded-3xl border border-white/10 bg-gradient-to-b from-white/10 to-transparent p-5 md:p-6 shadow-2xl backdrop-blur-xl shrink-0">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 pb-4 md:pb-6">
           <div>
             <p className="text-[10px] font-bold uppercase tracking-widest text-blue-400">ХУРАЛДААНЫ ТӨЛӨВ</p>
-            <h1 className="oswald-ui mt-1 text-2xl font-bold text-white md:text-4xl">
+            <h1 className="oswald-ui mt-1 text-xl font-bold text-white md:text-4xl">
               #{code}
             </h1>
             <p className="mt-1 text-sm text-white/80">
@@ -423,7 +423,7 @@ export default function SessionPage() {
       ) : null}
 
       {token ? (
-        <div className="mt-6 min-h-[400px]">
+        <div className="mt-6 flex-1 flex flex-col min-h-0">
           {pollActive ? (
             data?.myVote ? (
               <div className="flex flex-col items-center justify-center rounded-[2.5rem] bg-white/5 py-20 text-center backdrop-blur-md">
@@ -437,7 +437,7 @@ export default function SessionPage() {
               </div>
             ) : (
               <>
-                <div className={`mb-6 flex items-center justify-center gap-3 rounded-2xl py-3 ring-1 ${pollActive ? 'bg-emerald-500/10 ring-emerald-500/30' : 'bg-white/5 ring-white/10'}`}>
+                <div className={`mb-4 flex items-center justify-center gap-3 rounded-2xl py-3 ring-1 shrink-0 ${pollActive ? 'bg-emerald-500/10 ring-emerald-500/30' : 'bg-white/5 ring-white/10'}`}>
                   <span className="relative flex h-3 w-3">
                     {pollActive && <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75"></span>}
                     <span className={`relative inline-flex h-3 w-3 rounded-full ${pollActive ? 'bg-emerald-500' : 'bg-white/20'}`}></span>
@@ -446,7 +446,7 @@ export default function SessionPage() {
                     {pollActive ? "САНАЛ ХУРААЛТ ИДЭВХТЭЙ" : "САНАЛ ХУРААЛТ ДУУССАН"}
                   </span>
                 </div>
-                <div className="grid h-[calc(100dvh-380px)] min-h-[300px] grid-cols-2 gap-4">
+                <div className="grid flex-1 min-h-0 grid-cols-1 md:grid-cols-2 gap-4 pb-4">
                   <button
                     type="button"
                     disabled={loading || !pollActive}
@@ -489,25 +489,25 @@ export default function SessionPage() {
               </>
             )
           ) : data?.results ? (
-              <div className="flex flex-col items-center justify-center rounded-[2.5rem] bg-white/5 p-10 text-center backdrop-blur-md">
+              <div className="flex flex-col items-center justify-center rounded-[2.5rem] bg-white/5 p-6 md:p-10 text-center backdrop-blur-md flex-1">
                 <div className="mb-2 text-[10px] font-black uppercase tracking-[0.3em] text-white/40">RESULT</div>
-                <h2 className="oswald-ui text-3xl font-bold text-white">САНАЛ ХУРААЛТЫН ДҮН</h2>
-                <div className="mt-10 grid w-full grid-cols-2 gap-6">
-                  <div className="group relative overflow-hidden rounded-3xl border border-emerald-500/20 bg-emerald-500/10 p-6 transition-all hover:bg-emerald-500/20">
+                <h2 className="oswald-ui text-2xl md:text-3xl font-bold text-white uppercase">Санал хураалтын дүн</h2>
+                <div className="mt-8 grid w-full grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-6">
+                  <div className="group relative overflow-hidden rounded-3xl border border-emerald-500/20 bg-emerald-500/10 p-4 md:p-6 transition-all hover:bg-emerald-500/20">
                     <div className="text-xs font-bold uppercase tracking-wider text-emerald-400">Зөвшөөрсөн</div>
-                    <div className="mt-2 text-5xl font-black text-white">{data.results.approveCount}</div>
+                    <div className="mt-2 text-4xl md:text-5xl font-black text-white">{data.results.approveCount}</div>
                     <div className="mt-1 text-sm font-medium text-emerald-400/70">{data.results.approvePercent.toFixed(1)}%</div>
                   </div>
-                  <div className="group relative overflow-hidden rounded-3xl border border-amber-500/20 bg-amber-500/10 p-6 transition-all hover:bg-amber-500/20">
+                  <div className="group relative overflow-hidden rounded-3xl border border-amber-500/20 bg-amber-500/10 p-4 md:p-6 transition-all hover:bg-amber-500/20">
                     <div className="text-xs font-bold uppercase tracking-wider text-amber-400">Татгалзсан</div>
-                    <div className="mt-2 text-5xl font-black text-white">{data.results.denyCount}</div>
+                    <div className="mt-2 text-4xl md:text-5xl font-black text-white">{data.results.denyCount}</div>
                     <div className="mt-1 text-sm font-medium text-amber-400/70">{data.results.denyPercent.toFixed(1)}%</div>
                   </div>
                 </div>
-                <p className="mt-10 text-xs font-medium uppercase tracking-widest text-white/30 animate-pulse">Дараагийн асуудал орохыг хүлээнэ үү</p>
+                <p className="mt-8 text-xs font-medium uppercase tracking-widest text-white/30 animate-pulse">Дараагийн асуудал орохыг хүлээнэ үү</p>
               </div>
           ) : (
-            <div className="flex flex-col items-center justify-center rounded-[2.5rem] bg-white/5 py-20 text-center">
+            <div className="flex flex-col items-center justify-center rounded-[2.5rem] bg-white/5 py-10 text-center flex-1">
               {data?.poll?.isActive ? (
                 <div className="mb-4 h-12 w-12 animate-spin rounded-full border-4 border-white/20 border-t-white" />
               ) : (
