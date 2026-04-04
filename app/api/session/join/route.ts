@@ -41,6 +41,22 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Session not found." }, { status: 404 });
     }
 
+    // Ирц дүүрсэн эсэхийг шалгах
+    if (session.planned_attendee_count && session.planned_attendee_count > 0) {
+      const { count, error: countError } = await supabase
+        .from("members")
+        .select("id", { count: "exact", head: true })
+        .eq("session_code", code)
+        .is("kicked_at", null);
+
+      if (!countError && count !== null && count >= session.planned_attendee_count) {
+        return NextResponse.json(
+          { error: "Уучлаарай, ирц дүүрсэн тул орох боломжгүй байна." },
+          { status: 403 }
+        );
+      }
+    }
+
     const token = crypto.randomBytes(24).toString("hex");
 
     const { data: member, error: memberError } = await supabase

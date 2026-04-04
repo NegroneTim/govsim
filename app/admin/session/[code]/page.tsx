@@ -8,6 +8,7 @@ import { ProgressCircle } from "@heroui/react";
 type ScreenResponse = {
   sessionCode: string;
   nowISO: string;
+  isSpeechMode?: boolean;
   poll: {
     id: string;
     problem: string;
@@ -136,6 +137,40 @@ function buildRandomSplitDummyVoters(seed: number): {
   return { approve, deny };
 }
 
+/** Цифр бүрийг босоо чиглэлд гүйлгэж харуулах туслах компонент */
+function Digit({ value }: { value: string }) {
+  const isNumber = /^[0-9]$/.test(value);
+  if (!isNumber) return <span className="inline-block">{value}</span>;
+
+  const num = parseInt(value, 10);
+
+  return (
+    <span className="relative inline-flex h-[1em] w-[1.2ch] items-center justify-center overflow-hidden leading-none tabular-nums">
+      <span
+        className="absolute flex flex-col transition-transform duration-300 ease-out"
+        style={{ transform: `translateY(-${num * 10}%)`, top: 0 }}
+      >
+        {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => (
+          <span key={n} className="flex h-[1em] items-center justify-center">
+            {n}
+          </span>
+        ))}
+      </span>
+    </span>
+  );
+}
+
+/** Бүхэл тоог цифр болгож хуваагаад Rolling эффект оруулах компонент */
+function RollingNumber({ value }: { value: string | number }) {
+  return (
+    <span className="inline-flex items-baseline">
+      {String(value).split("").map((char, i) => (
+        <Digit key={i} value={char} />
+      ))}
+    </span>
+  );
+}
+
 function formatDate(iso: string) {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
@@ -170,6 +205,7 @@ export default function AdminSessionPage() {
   const [pollFromScreen, setPollFromScreen] = useState<ScreenResponse["poll"]>(null);
   const [results, setResults] = useState<ScreenResponse["results"]>(null);
   const [attendance, setAttendance] = useState<ScreenResponse["attendance"] | null>(null);
+  const [isSpeechMode, setIsSpeechMode] = useState(false);
   const [starting, setStarting] = useState(false);
   const [copiedCode, setCopiedCode] = useState(false);
   const [showQr, setShowQr] = useState(false);
@@ -185,18 +221,18 @@ export default function AdminSessionPage() {
   const [nowISO, setNowISO] = useState<string | null>(null);
   const [mounted, setMounted] = useState(false);
   const [receiveAt, setReceiveAt] = useState<number | null>(null);
-  const [setupStartedAt, setSetupStartedAt] = useState<number | null>(null);
-  const [activeDisplayPhase, setActiveDisplayPhase] = useState<ActiveDisplayPhase>("countdown");
   const autoClosedPollRef = useRef<string | null>(null);
   const receivePollIdRef = useRef<string | null>(null);
-  const setupTimeoutRef = useRef<number | null>(null);
   const qrRef = useRef<HTMLDivElement | null>(null);
 
   const xAdminKey = mounted ? adminKey : "";
   const plannedFromQuery = Number.parseInt(searchParams.get("planned") ?? "", 10);
 
   const loadScreen = useCallback(async () => {
-    const res = await fetch(`/api/session/${code}/screen`);
+    const res = await fetch(`/api/session/${code}/screen`, {
+      cache: "no-store",
+      headers: { "Pragma": "no-cache", "Cache-Control": "no-cache" }
+    });
     if (!res.ok) {
       const errJson = await res.json().catch(() => ({}));
       setApiError(errJson.error || "Холболтын алдаа гарлаа.");
@@ -207,36 +243,18 @@ export default function AdminSessionPage() {
     setPollFromScreen(json.poll);
     setResults(json.results);
     setAttendance(json.attendance ?? null);
+    setIsSpeechMode(!!json.isSpeechMode);
     const p = json.poll;
     if (p?.isActive) {
       if (receivePollIdRef.current !== p.id) {
         receivePollIdRef.current = p.id;
-        setSetupStartedAt(Date.now());
-        setActiveDisplayPhase("setup");
+        setReceiveAt(Date.now());
         const audio = new Audio("/api/audio/countdown-start");
         audio.volume = 1;
         void audio.play().catch(() => {
           /* ignore autoplay block; user interaction will enable next attempt */
         });
-        if (setupTimeoutRef.current != null) {
-          window.clearTimeout(setupTimeoutRef.current);
-        }
-        setupTimeoutRef.current = window.setTimeout(() => {
-          setReceiveAt(Date.now());
-          setSetupStartedAt(null);
-          setActiveDisplayPhase("countdown");
-          setupTimeoutRef.current = null;
-        }, 3000);
       }
-    } else {
-      if (setupTimeoutRef.current != null) {
-        window.clearTimeout(setupTimeoutRef.current);
-        setupTimeoutRef.current = null;
-      }
-      receivePollIdRef.current = null;
-      setSetupStartedAt(null);
-      setReceiveAt(null);
-      setActiveDisplayPhase("countdown");
     }
   }, [code]);
 
@@ -291,46 +309,41 @@ export default function AdminSessionPage() {
 
     const channel = supabase
       .channel(`admin_realtime_${code}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "members",
-          filter: `session_code=eq.${code}`,
-        },
-        () => {
-          // Ирцийн мэдээллийг шинэчлэх
-          void loadScreen();
-          // Гар өргөлтийг хянахын тулд гишүүдийг байнга шинэчилнэ
-          void loadMembers("refresh");
-        })
-        .on(
-          "postgres_changes",
-          {
-            event: "INSERT",
-            schema: "public",
-            table: "votes",
-            filter: `session_code=eq.${code}`,
-          },
-          () => {
-            void loadScreen();
-        }
-      )
+      .on("postgres_changes", {
+        event: "*",
+        schema: "public",
+        table: "members",
+        filter: `session_code=eq.${code}`,
+      }, () => {
+        void loadScreen();
+        void loadMembers("refresh");
+      })
+      .on("postgres_changes", {
+        event: "*",
+        schema: "public",
+        table: "polls",
+        filter: `session_code=eq.${code}`,
+      }, () => {
+        void loadScreen();
+      })
+      .on("postgres_changes", {
+        event: "INSERT",
+        schema: "public",
+        table: "votes",
+        filter: `session_code=eq.${code}`,
+      }, (payload:any) => {
+        // Optimistically update the vote count for instant real-time feel
+        setAttendance((prev) =>
+          prev ? { ...prev, votesCastCount: prev.votesCastCount + 1 } : prev
+        );
+        void loadScreen();
+      })
       .subscribe();
 
     return () => {
       void supabase.removeChannel(channel);
     };
-  }, [code, mounted, loadScreen, loadMembers, showMembers]);
-
-  useEffect(() => {
-    if (!pollFromScreen?.isActive) return;
-    const id = window.setInterval(() => {
-      void loadScreen();
-    }, 1000);
-    return () => window.clearInterval(id);
-  }, [pollFromScreen?.isActive, loadScreen]);
+  }, [code, mounted, loadScreen, loadMembers]); // showMembers-ийг хасав
 
   useEffect(() => {
     setMounted(true);
@@ -339,7 +352,7 @@ export default function AdminSessionPage() {
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       const key = e.key?.toLowerCase();
-      if (!key || !["q", "a", "s", "e", "r", "x"].includes(key)) return;
+      if (!key || !["q", "a", "s", "e", "r", "x", "f"].includes(key)) return;
       const target = e.target as HTMLElement | null;
       const tag = target?.tagName?.toLowerCase();
       const isTypingContext =
@@ -349,6 +362,10 @@ export default function AdminSessionPage() {
       e.preventDefault();
       if (key === "q") {
         setShowQr((v) => !v);
+        return;
+      }
+      if (key === "f") {
+        void toggleSpeechMode();
         return;
       }
       if (key === "e") {
@@ -382,20 +399,12 @@ export default function AdminSessionPage() {
   }, [pollFromScreen?.isActive, pollFromScreen?.endsAt]);
 
   const remaining = useMemo(() => {
-    if (!pollFromScreen?.isActive || activeDisplayPhase !== "countdown" || receiveAt == null) return null;
+    if (!pollFromScreen?.isActive || receiveAt == null) return null;
     void tick;
-    return Math.max(
-      0,
-      (pollFromScreen.durationSeconds ?? 0) - Math.floor((Date.now() - receiveAt) / 1000)
-    );
-  }, [pollFromScreen?.isActive, pollFromScreen?.durationSeconds, receiveAt, tick, activeDisplayPhase]);
-
-  const setupRemaining = useMemo(() => {
-    if (activeDisplayPhase !== "setup" || !setupStartedAt) return null;
-    void tick;
-    const elapsed = Math.floor((Date.now() - setupStartedAt) / 1000);
-    return Math.max(1, 3 - elapsed);
-  }, [activeDisplayPhase, setupStartedAt, tick]);
+    const elapsed = Math.floor((Date.now() - receiveAt) / 1000);
+    const total = pollFromScreen?.durationSeconds ?? 10;
+    return Math.max(0, total - elapsed);
+  }, [pollFromScreen?.isActive, pollFromScreen?.durationSeconds, receiveAt, tick]);
 
   const currentAttendance = attendance?.eligibleMemberCount ?? 0;
   const plannedAttendanceRaw = attendance?.plannedAttendeeCount ?? 0;
@@ -412,10 +421,13 @@ export default function AdminSessionPage() {
   const dummySplit = useMemo(() => buildRandomSplitDummyVoters(0x9e3779b9), []);
 
   const resultsForUi = useMemo(() => {
+    // Зөвхөн тоолуур 0 болсон үед л үр дүнг харуулна
+    if (remaining !== 0 && remaining !== null && !demoMode) return null;
+
     if (results) return results;
     if (demoMode) return DEMO_PREVIEW_RESULTS;
     return null;
-  }, [results, demoMode]);
+  }, [results, demoMode, remaining]);
 
   const approveDisplay = useMemo(() => {
     if (!resultsForUi || resultsForUi.anonymous) return [];
@@ -472,6 +484,24 @@ export default function AdminSessionPage() {
     }
   }
 
+  async function toggleSpeechMode() {
+    if (!xAdminKey) return;
+    const next = !isSpeechMode;
+    try {
+      await fetch(`/api/admin/sessions/${code}/speech-mode`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Admin-Key": xAdminKey },
+        body: JSON.stringify({ active: next }),
+      });
+      setIsSpeechMode(next);
+      if (!next) {
+        void lowerAllHands();
+      }
+    } catch (err) {
+      console.error("Failed to toggle speech mode", err);
+    }
+  }
+
   /** One full scroll cycle (seconds). Short lists stay readable; long lists cap so the roll doesn’t crawl. */
   const creditsDurationSec = useMemo(() => {
     if (!resultsForUi) return 24;
@@ -512,6 +542,8 @@ export default function AdminSessionPage() {
     if (!xAdminKey) return;
     if (pollFromScreen?.isActive) return;
     setStarting(true);
+    // Clear previous results and poll state immediately to prevent "flash"
+    setResults(null);
     try {
       const res = await fetch(`/api/admin/sessions/${code}/poll/start`, {
         method: "POST",
@@ -594,17 +626,6 @@ export default function AdminSessionPage() {
     autoClosedPollRef.current = activePollId;
     void closePoll();
   }, [activePollId, isPollActive, remaining, closePoll]);
-
-  // Бүх хүн санал өгсөн бол автоматаар хаах
-  useEffect(() => {
-    if (!isPollActive || !attendance || !activePollId) return;
-    if (attendance.votesCastCount >= attendance.eligibleMemberCount && attendance.eligibleMemberCount > 0) {
-      if (autoClosedPollRef.current === activePollId) return;
-      autoClosedPollRef.current = activePollId;
-      // Бага зэрэг хүлээлт хийж (0.5с) хаавал илүү үзэмжтэй
-      window.setTimeout(() => void closePoll(), 500);
-    }
-  }, [attendance?.votesCastCount, attendance?.eligibleMemberCount, isPollActive, activePollId, closePoll]);
 
   async function onConfirmModalApprove() {
     if (!confirmModal) return;
@@ -742,7 +763,27 @@ export default function AdminSessionPage() {
         </div>
       ) : null}
 
-      {forceAttendanceView || (!pollFromScreen && !demoMode) ? (
+      {isSpeechMode ? (
+        <div className="flex min-h-screen flex-col items-center justify-center px-6 animate-in fade-in zoom-in duration-500">
+          <div className="mb-4 text-3xl font-bold uppercase tracking-[0.2em] text-[#fde047]">ҮГ ХЭЛЭХ ГИШҮҮД</div>
+          <div className="flex items-baseline gap-4 mb-12">
+            <span className="text-9xl font-black"><RollingNumber value={raisedHandsQueue.length} /></span>
+            <span className="text-4xl font-bold text-white/50 uppercase">ГАР ӨРГӨСӨН</span>
+          </div>
+          <div className="flex flex-wrap justify-center gap-6 max-w-6xl">
+            {raisedHandsQueue.map((m, i) => (
+              <div 
+                key={m.id} 
+                className="flex items-center gap-4 bg-white/10 backdrop-blur-md border border-white/20 rounded-2xl px-6 py-4 animate-in slide-in-from-bottom-4 fade-in duration-500"
+                style={{ animationDelay: `${i * 100}ms` }}
+              >
+                <span className="flex h-10 w-10 items-center justify-center rounded-full bg-[#fde047] text-[#0069a3] font-bold text-xl">{i + 1}</span>
+                <span className="text-2xl font-bold tracking-wide">{m.fullName}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : forceAttendanceView || (!pollFromScreen && !demoMode) ? (
         <div className="relative flex min-h-screen items-center justify-center px-6 lg:px-20">
           <div className="relative flex w-full max-w-[1600px] items-center justify-center gap-12 lg:gap-32">
             {/* Ирц - Дэлгэцийн голд */}
@@ -754,40 +795,31 @@ export default function AdminSessionPage() {
             >
               <ProgressCircle.Track className="h-full w-full -rotate-90">
                 <ProgressCircle.TrackCircle className="stroke-white/25" strokeWidth={1.5} />
-                <ProgressCircle.FillCircle className="stroke-[#fde047]" strokeWidth={1.5} />
+                <ProgressCircle.FillCircle className="stroke-[#fde047] transition-[stroke-dashoffset] duration-1000 ease-in-out" strokeWidth={1.5} />
               </ProgressCircle.Track>
               <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center px-4">
-                <p className="text-4xl font-semibold md:text-6xl">ИРЦ {currentAttendance}/{plannedAttendance}</p>
+                <p className="text-4xl font-semibold md:text-6xl">
+                  ИРЦ <RollingNumber value={currentAttendance} />
+                  <span className="mx-1 text-white/50">/</span>
+                  <RollingNumber value={plannedAttendance} />
+                </p>
                 <p className="mt-2 text-2xl font-semibold text-white/85 md:text-4xl">{attendancePercent.toFixed(1)}%</p>
               </div>
             </ProgressCircle.Root>
 
           </div>
         </div>
-      ) : pollFromScreen?.isActive ? (
-        <div className="flex min-h-screen flex-col items-center justify-center px-6 text-center">
-          {activeDisplayPhase === "setup" ? (
-            <div className="flex flex-col items-center">
-              <div className="text-3xl font-bold uppercase tracking-widest text-white/60 md:text-5xl">
-                Санал хураалт эхлэхэд
-              </div>
-              <div className="mt-10 text-[12rem] font-black leading-none text-[#fde047] md:text-[20rem] animate-pulse">
-                {setupRemaining}
-              </div>
-            </div>
-          ) : (
-            <>
-              <div className="mb-6 text-3xl font-semibold tracking-wide text-white md:text-5xl">
-                Ирц {currentAttendance}/{plannedAttendance} {attendancePercent.toFixed(1)}%
-              </div>
-              <div className="text-[10rem] font-bold leading-none tabular-nums text-[#fde047] md:text-[16rem]">
-                {remaining ?? 0}
-              </div>
-              <div className="mt-6 rounded-md border border-white/20 bg-[#005180]/30 px-4 py-2 text-sm text-white/90">
-                Санал өгсөн: {attendance?.votesCastCount ?? 0}
-              </div>
-            </>
-          )}
+      ) : (isPollActive || (remaining !== null && remaining > 0)) ? (
+        <div className="flex min-h-screen flex-col items-center justify-center px-6 text-center animate-in fade-in zoom-in duration-1000 ease-out">
+          <div className="mb-2 text-3xl font-semibold tracking-wide text-white md:text-5xl">
+            Ирц <RollingNumber value={currentAttendance} />/<RollingNumber value={plannedAttendance} /> {attendancePercent.toFixed(1)}%
+          </div>
+          <div className="mb-10 text-xl font-bold tracking-widest text-white/60 md:text-3xl">
+            САНАЛ ӨГСӨН: <span className="text-white"><RollingNumber value={attendance?.votesCastCount ?? 0} /></span>
+          </div>
+          <div key={remaining} className="text-[14rem] font-bold leading-none tabular-nums text-[#fde047] drop-shadow-[0_0_50px_rgba(253,224,71,0.3)] animate-in zoom-in fade-in duration-200 md:text-[20rem]">
+            {remaining ?? 10}
+          </div>
         </div>
       ) : resultsForUi ? (
         <div className="flex min-h-screen flex-col px-6 pb-6 pt-24 md:px-10 md:pt-28">
@@ -810,7 +842,7 @@ export default function AdminSessionPage() {
                 <div className="flex w-full shrink-0 flex-col items-center text-center">
                   <div className="text-5xl font-bold uppercase md:text-7xl lg:text-8xl">Зөвшөөрсөн</div>
                   <div className="mt-1 text-2xl font-semibold md:text-4xl lg:text-5xl">
-                    {resultsForUi.approveCount}/{attendance?.eligibleMemberCount ?? resultsForUi.totalVotes}{" "}
+                    <RollingNumber value={resultsForUi.approveCount} />/<RollingNumber value={attendance?.eligibleMemberCount ?? resultsForUi.totalVotes} />{" "}
                     {resultsForUi.approvePercent.toFixed(1)}%
                   </div>
                 </div>
@@ -820,8 +852,8 @@ export default function AdminSessionPage() {
                     <div className="text-start leading-tight">
                       <div className="text-4xl font-bold uppercase md:text-6xl">Зөвшөөрсөн</div>
                       <div className="mt-1 text-lg font-semibold leading-tight md:text-2xl">
-                        {resultStatsForScreen!.approveCount}/
-                        {attendance?.eligibleMemberCount ?? resultStatsForScreen!.totalVotes}{" "}
+                        <RollingNumber value={resultStatsForScreen!.approveCount} />/
+                        <RollingNumber value={attendance?.eligibleMemberCount ?? resultStatsForScreen!.totalVotes} />{" "}
                         {resultStatsForScreen!.approvePercent.toFixed(1)}%
                       </div>
                     </div>
@@ -831,17 +863,17 @@ export default function AdminSessionPage() {
                       className="screen-credits-track pr-1"
                       style={{ animationDuration: `${creditsDurationSec}s`, animationIterationCount: "infinite" }}
                     >
-                        {approveDisplay.length === 0 ? (
-                          <div className="pt-1 text-3xl text-white/80 md:text-4xl">—</div>
-                        ) : (
-                          approveDisplay.map((v) => (
-                            <div key={v.memberId} className="mb-3 text-2xl font-semibold md:text-4xl">
-                              {v.fullName}
-                            </div>
-                          ))
-                        )}
-                      </div>
+                      {approveDisplay.length === 0 ? (
+                        <div className="pt-1 text-3xl text-white/80 md:text-4xl">—</div>
+                      ) : (
+                        approveDisplay.map((v) => (
+                          <div key={v.memberId} className="mb-3 text-2xl font-semibold md:text-4xl">
+                            {v.fullName}
+                          </div>
+                        ))
+                      )}
                     </div>
+                  </div>
                 </div>
               )}
             </div>
@@ -857,7 +889,7 @@ export default function AdminSessionPage() {
                 <div className="flex w-full shrink-0 flex-col items-center text-center">
                   <div className="text-5xl font-bold uppercase text-[#fde047] md:text-7xl lg:text-8xl">Татгалзсан</div>
                   <div className="mt-1 text-2xl font-semibold text-[#fde047] md:text-4xl lg:text-5xl">
-                    {resultsForUi.denyCount}/{attendance?.eligibleMemberCount ?? resultsForUi.totalVotes}{" "}
+                    <RollingNumber value={resultsForUi.denyCount} />/<RollingNumber value={attendance?.eligibleMemberCount ?? resultsForUi.totalVotes} />{" "}
                     {resultsForUi.denyPercent.toFixed(1)}%
                   </div>
                 </div>
@@ -867,8 +899,8 @@ export default function AdminSessionPage() {
                     <div className="text-start leading-tight">
                       <div className="text-4xl font-bold uppercase text-[#fde047] md:text-6xl">Татгалзсан</div>
                       <div className="mt-1 text-lg font-semibold leading-tight text-[#fde047] md:text-2xl">
-                        {resultStatsForScreen!.denyCount}/
-                        {attendance?.eligibleMemberCount ?? resultStatsForScreen!.totalVotes}{" "}
+                        <RollingNumber value={resultStatsForScreen!.denyCount} />/
+                        <RollingNumber value={attendance?.eligibleMemberCount ?? resultStatsForScreen!.totalVotes} />{" "}
                         {resultStatsForScreen!.denyPercent.toFixed(1)}%
                       </div>
                     </div>
@@ -878,17 +910,17 @@ export default function AdminSessionPage() {
                       className="screen-credits-track pr-1"
                       style={{ animationDuration: `${creditsDurationSec}s`, animationIterationCount: "infinite" }}
                     >
-                        {denyDisplay.length === 0 ? (
-                          <div className="pt-1 text-3xl text-[#fde047] md:text-4xl">—</div>
-                        ) : (
-                          denyDisplay.map((v) => (
-                            <div key={v.memberId} className="mb-3 text-2xl font-semibold text-[#fde047] md:text-4xl">
-                              {v.fullName}
-                            </div>
-                          ))
-                        )}
-                      </div>
+                      {denyDisplay.length === 0 ? (
+                        <div className="pt-1 text-3xl text-[#fde047] md:text-4xl">—</div>
+                      ) : (
+                        denyDisplay.map((v) => (
+                          <div key={v.memberId} className="mb-3 text-2xl font-semibold text-[#fde047] md:text-4xl">
+                            {v.fullName}
+                          </div>
+                        ))
+                      )}
                     </div>
+                  </div>
                 </div>
               )}
             </div>

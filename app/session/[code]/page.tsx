@@ -1,7 +1,7 @@
 "use client";
 
 import { useParams, useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { supabase } from "@/lib/supabase";
 
 type PollResponse = {
@@ -17,6 +17,7 @@ type PollResponse = {
   myVote: "approve" | "deny" | null;
   member: { fullName: string } | null;
   handRaisedAt: string | null;
+  isSpeechMode?: boolean;
   results?: {
     totalVotes: number;
     approveCount: number;
@@ -44,6 +45,7 @@ export default function SessionPage() {
   const [now, setNow] = useState(0);
   const [ready, setReady] = useState(false);
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
+  const hasLeftRef = useRef(false);
   const [handLoading, setHandLoading] = useState(false);
 
   // Клиент талын цагийг секунд тутам шинэчлэх
@@ -88,9 +90,15 @@ export default function SessionPage() {
         headers: {
           Authorization: `Bearer ${token}`,
         },
+        cache: "no-store",
       });
       if (!res.ok) {
         const text = await res.text().catch(() => "Unknown error");
+        if (text.toLowerCase().includes("member not found or kicked")) {
+          clearMemberStorage();
+          router.replace("/");
+          return;
+        }
         setError(toFriendlyMessage(text || "Санал ачаалж чадсангүй."));
         return;
       }
@@ -102,9 +110,11 @@ export default function SessionPage() {
         poll: raw.poll ? {
           ...raw.poll,
           isActive: raw.poll.isActive ?? raw.poll.is_active,
+          status: raw.poll.status,
           endsAt: raw.poll.endsAt ?? raw.poll.ends_at,
         } : null,
         handRaisedAt: raw.handRaisedAt ?? raw.hand_raised_at ?? null,
+        isSpeechMode: !!(raw.isSpeechMode ?? raw.is_speech_mode),
       };
 
       setData(json);
@@ -176,7 +186,24 @@ export default function SessionPage() {
       .on(
         "postgres_changes",
         {
-          event: "UPDATE",
+          event: "*",
+          schema: "public",
+          table: "sessions",
+          filter: `code=eq.${code}`,
+        },
+        (payload:any) => {
+          const next = payload.new as any;
+          const speechActive = !!(next.is_speech_mode ?? next.isSpeechMode);
+          setData((prev) => (prev ? { ...prev, isSpeechMode: speechActive } : prev));
+          
+          // Only trigger full fetch if other session data changed
+          void fetchData();
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
           schema: "public",
           table: "members",
           filter: `session_code=eq.${code}`,
@@ -220,10 +247,10 @@ export default function SessionPage() {
       setData((prev) =>
         prev
           ? {
-              ...prev,
-              myVote: choice,
-              poll: prev.poll ? { ...prev.poll, isActive: true } : prev.poll,
-            }
+            ...prev,
+            myVote: choice,
+            poll: prev.poll ? { ...prev.poll, isActive: true } : prev.poll,
+          }
           : prev
       );
       setError(null);
@@ -281,6 +308,7 @@ export default function SessionPage() {
     if (!token) return;
     setShowLeaveConfirm(false);
     setLeaving(true);
+    hasLeftRef.current = true; // cleanup-аар дахиж дуудахаас сэргийлнэ
     setError(null);
     try {
       const res = await fetch(`/api/session/${code}/leave`, {
@@ -304,16 +332,15 @@ export default function SessionPage() {
   return (
     <div className="mx-auto w-full max-w-5xl px-5 py-8 md:px-8">
       {/* Raise Hand Floating Button */}
-      {token && (
+      {token && data?.isSpeechMode && (
         <button
           type="button"
           onClick={toggleHand}
           disabled={handLoading}
-          className={`fixed bottom-8 right-8 z-50 flex h-16 w-16 items-center justify-center rounded-full shadow-2xl transition-all active:scale-90 ${
-            data?.handRaisedAt 
-            ? "bg-amber-500 text-slate-900 ring-4 ring-amber-500/20" 
-            : "bg-white text-slate-900 hover:bg-blue-500 hover:text-white"
-          }`}
+          className={`fixed bottom-8 right-8 z-50 flex h-16 w-16 items-center justify-center rounded-full shadow-2xl transition-all active:scale-90 ${data?.handRaisedAt
+              ? "bg-amber-500 text-slate-900 ring-4 ring-amber-500/20"
+              : "bg-white text-slate-900 hover:bg-blue-500 hover:text-white"
+            }`}
         >
           {handLoading ? <span className="h-5 w-5 animate-spin rounded-full border-2 border-current border-t-transparent" /> : <span className="text-2xl">✋</span>}
         </button>
@@ -397,8 +424,71 @@ export default function SessionPage() {
 
       {token ? (
         <div className="mt-6 min-h-[400px]">
-          {(!pollActive && !isGracePeriod) || data?.results ? (
-            data?.results ? (
+          {pollActive ? (
+            data?.myVote ? (
+              <div className="flex flex-col items-center justify-center rounded-[2.5rem] bg-white/5 py-20 text-center backdrop-blur-md">
+                <div className="mb-6 rounded-full bg-emerald-500/10 p-6 text-emerald-400 ring-1 ring-emerald-500/50">
+                  <svg viewBox="0 0 24 24" className="h-12 w-12" fill="none" stroke="currentColor" strokeWidth="3">
+                    <path d="M20 6L9 17l-5-5" />
+                  </svg>
+                </div>
+                <p className="oswald-ui text-3xl font-bold text-white">САНАЛ ХҮЛЭЭЖ АВЛАА</p>
+                <p className="mt-2 text-sm text-white/50">Таны санал амжилттай бүртгэгдсэн. Үр дүнг хүлээнэ үү.</p>
+              </div>
+            ) : (
+              <>
+                <div className={`mb-6 flex items-center justify-center gap-3 rounded-2xl py-3 ring-1 ${pollActive ? 'bg-emerald-500/10 ring-emerald-500/30' : 'bg-white/5 ring-white/10'}`}>
+                  <span className="relative flex h-3 w-3">
+                    {pollActive && <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75"></span>}
+                    <span className={`relative inline-flex h-3 w-3 rounded-full ${pollActive ? 'bg-emerald-500' : 'bg-white/20'}`}></span>
+                  </span>
+                  <span className={`text-xs font-black uppercase tracking-[0.2em] ${pollActive ? 'text-emerald-400' : 'text-white/40'}`}>
+                    {pollActive ? "САНАЛ ХУРААЛТ ИДЭВХТЭЙ" : "САНАЛ ХУРААЛТ ДУУССАН"}
+                  </span>
+                </div>
+                <div className="grid h-[calc(100dvh-380px)] min-h-[300px] grid-cols-2 gap-4">
+                  <button
+                    type="button"
+                    disabled={loading || !pollActive}
+                    onClick={() => castVote("approve")}
+                    className="group relative flex h-full flex-col items-center justify-center gap-4 overflow-hidden rounded-[2rem] border border-blue-400/30 bg-blue-600 px-4 transition-all hover:bg-blue-500 active:scale-95 disabled:opacity-50 shadow-[0_20px_40px_-10px_rgba(37,99,235,0.4)] disabled:grayscale"
+                  >
+                    {loading && <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/35 border-t-white" />}
+                    <svg
+                      viewBox="0 0 24 24"
+                      className="h-10 w-10 transition-transform group-hover:scale-110"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2.5"
+                    >
+                      <path d="M20 7L9 18l-5-5" />
+                    </svg>
+                    <span className="oswald-ui text-xl font-bold uppercase tracking-wider">Зөвшөөрөх</span>
+                    <div className="absolute inset-0 translate-y-full bg-gradient-to-t from-white/20 to-transparent transition-transform group-hover:translate-y-0" />
+                  </button>
+                  <button
+                    type="button"
+                    disabled={loading || !pollActive}
+                    onClick={() => castVote("deny")}
+                    className="group relative flex h-full flex-col items-center justify-center gap-4 overflow-hidden rounded-[2rem] border border-amber-400/30 bg-amber-600 px-4 transition-all hover:bg-amber-500 active:scale-95 disabled:opacity-50 shadow-[0_20px_40px_-10px_rgba(217,119,6,0.4)] disabled:grayscale"
+                  >
+                    {loading && <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/35 border-t-white" />}
+                    <svg
+                      viewBox="0 0 24 24"
+                      className="h-10 w-10 transition-transform group-hover:scale-110"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2.5"
+                    >
+                      <path d="M6 6l12 12M18 6L6 18" />
+                    </svg>
+                    <span className="oswald-ui text-xl font-bold uppercase tracking-wider">Татгалзах</span>
+                    <div className="absolute inset-0 translate-y-full bg-gradient-to-t from-white/20 to-transparent transition-transform group-hover:translate-y-0" />
+                  </button>
+                </div>
+              </>
+            )
+          ) : data?.results ? (
               <div className="flex flex-col items-center justify-center rounded-[2.5rem] bg-white/5 p-10 text-center backdrop-blur-md">
                 <div className="mb-2 text-[10px] font-black uppercase tracking-[0.3em] text-white/40">RESULT</div>
                 <h2 className="oswald-ui text-3xl font-bold text-white">САНАЛ ХУРААЛТЫН ДҮН</h2>
@@ -416,84 +506,21 @@ export default function SessionPage() {
                 </div>
                 <p className="mt-10 text-xs font-medium uppercase tracking-widest text-white/30 animate-pulse">Дараагийн асуудал орохыг хүлээнэ үү</p>
               </div>
-            ) : (
-              <div className="flex flex-col items-center justify-center rounded-[2.5rem] bg-white/5 py-20 text-center">
-                {data?.poll?.isActive ? (
-                  <div className="mb-4 h-12 w-12 animate-spin rounded-full border-4 border-white/20 border-t-white" />
-                ) : (
-                  <div className="mb-6 animate-pulse rounded-full bg-white/10 p-6 text-white/40">
-                    <svg viewBox="0 0 24 24" className="h-10 w-10" fill="none" stroke="currentColor" strokeWidth="2">
-                      <path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
-                  </div>
-                )}
-                <p className="text-xl font-medium tracking-tight text-white/70">
-                  {data?.poll?.isActive ? "Үр дүнг нэгтгэж байна..." : "Санал хураалт эхлэхийг хүлээнэ үү..."}
-                </p>
-              </div>
-            )
-          ) : data?.myVote ? (
-            <div className="flex flex-col items-center justify-center rounded-[2.5rem] bg-white/5 py-20 text-center backdrop-blur-md">
-              <div className="mb-6 rounded-full bg-emerald-500/10 p-6 text-emerald-400 ring-1 ring-emerald-500/50">
-                <svg viewBox="0 0 24 24" className="h-12 w-12" fill="none" stroke="currentColor" strokeWidth="3">
-                  <path d="M20 6L9 17l-5-5" />
-                </svg>
-              </div>
-              <p className="oswald-ui text-3xl font-bold text-white">САНАЛ ХҮЛЭЭЖ АВЛАА</p>
-              <p className="mt-2 text-sm text-white/50">Таны санал амжилттай бүртгэгдсэн. Үр дүнг хүлээнэ үү.</p>
-            </div>
           ) : (
-            <>
-              <div className={`mb-6 flex items-center justify-center gap-3 rounded-2xl py-3 ring-1 ${pollActive ? 'bg-emerald-500/10 ring-emerald-500/30' : 'bg-white/5 ring-white/10'}`}>
-                <span className="relative flex h-3 w-3">
-                  {pollActive && <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75"></span>}
-                  <span className={`relative inline-flex h-3 w-3 rounded-full ${pollActive ? 'bg-emerald-500' : 'bg-white/20'}`}></span>
-                </span>
-                <span className={`text-xs font-black uppercase tracking-[0.2em] ${pollActive ? 'text-emerald-400' : 'text-white/40'}`}>
-                  {pollActive ? "САНАЛ ХУРААЛТ ИДЭВХТЭЙ" : "САНАЛ ХУРААЛТ ДУУССАН"}
-                </span>
-              </div>
-              <div className="grid h-[calc(100dvh-380px)] min-h-[300px] grid-cols-2 gap-4">
-                <button
-                  type="button"
-                  disabled={loading || !pollActive}
-                  onClick={() => castVote("approve")}
-                  className="group relative flex h-full flex-col items-center justify-center gap-4 overflow-hidden rounded-[2rem] border border-blue-400/30 bg-blue-600 px-4 transition-all hover:bg-blue-500 active:scale-95 disabled:opacity-50 shadow-[0_20px_40px_-10px_rgba(37,99,235,0.4)] disabled:grayscale"
-                >
-                  {loading && <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/35 border-t-white" />}
-                  <svg
-                    viewBox="0 0 24 24"
-                    className="h-10 w-10 transition-transform group-hover:scale-110"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2.5"
-                  >
-                    <path d="M20 7L9 18l-5-5" />
+            <div className="flex flex-col items-center justify-center rounded-[2.5rem] bg-white/5 py-20 text-center">
+              {data?.poll?.isActive ? (
+                <div className="mb-4 h-12 w-12 animate-spin rounded-full border-4 border-white/20 border-t-white" />
+              ) : (
+                <div className="mb-6 animate-pulse rounded-full bg-white/10 p-6 text-white/40">
+                  <svg viewBox="0 0 24 24" className="h-10 w-10" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                   </svg>
-                  <span className="oswald-ui text-xl font-bold uppercase tracking-wider">Зөвшөөрөх</span>
-                  <div className="absolute inset-0 translate-y-full bg-gradient-to-t from-white/20 to-transparent transition-transform group-hover:translate-y-0" />
-                </button>
-                <button
-                  type="button"
-                  disabled={loading || !pollActive}
-                  onClick={() => castVote("deny")}
-                  className="group relative flex h-full flex-col items-center justify-center gap-4 overflow-hidden rounded-[2rem] border border-amber-400/30 bg-amber-600 px-4 transition-all hover:bg-amber-500 active:scale-95 disabled:opacity-50 shadow-[0_20px_40px_-10px_rgba(217,119,6,0.4)] disabled:grayscale"
-                >
-                  {loading && <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/35 border-t-white" />}
-                  <svg
-                    viewBox="0 0 24 24"
-                    className="h-10 w-10 transition-transform group-hover:scale-110"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2.5"
-                  >
-                    <path d="M6 6l12 12M18 6L6 18" />
-                  </svg>
-                  <span className="oswald-ui text-xl font-bold uppercase tracking-wider">Татгалзах</span>
-                  <div className="absolute inset-0 translate-y-full bg-gradient-to-t from-white/20 to-transparent transition-transform group-hover:translate-y-0" />
-                </button>
-              </div>
-            </>
+                </div>
+              )}
+              <p className="text-xl font-medium tracking-tight text-white/70">
+                {data?.poll?.isActive ? "Үр дүнг нэгтгэж байна..." : "Санал хураалт эхлэхийг хүлээнэ үү..."}
+              </p>
+            </div>
           )}
         </div>
       ) : null}
